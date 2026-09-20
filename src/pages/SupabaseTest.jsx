@@ -161,9 +161,17 @@ export default function SupabaseTest() {
               </span>
             </div>
             <div className="flex items-center justify-between rounded border border-neutral-100 bg-neutral-50 p-3">
-              <span className="font-mono text-xs text-neutral-800">VITE_SUPABASE_ANON_KEY</span>
-              <span className={`text-xs font-semibold ${import.meta.env.VITE_SUPABASE_ANON_KEY ? 'text-emerald-700' : 'text-amber-700'}`}>
-                {import.meta.env.VITE_SUPABASE_ANON_KEY ? 'Configured' : 'Missing'}
+              <span className="font-mono text-xs text-neutral-800">
+                {import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ? 'VITE_SUPABASE_PUBLISHABLE_KEY' : 'VITE_SUPABASE_ANON_KEY'}
+              </span>
+              <span className={`text-xs font-semibold ${
+                (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY)
+                  ? 'text-emerald-700'
+                  : 'text-amber-700'
+              }`}>
+                {(import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY)
+                  ? 'Configured'
+                  : 'Missing'}
               </span>
             </div>
           </div>
