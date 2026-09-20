@@ -1,5 +1,7 @@
 # TrendNow 📈
 
+🔗 **Live Demo:** [https://trendznow.netlify.app](https://trendznow.netlify.app)
+
 **TrendNow** is a modern, real-time trend discovery and analytics platform designed to monitor, analyze, and surface emerging trends across social platforms, web searches, and news feeds.
 
 ---
