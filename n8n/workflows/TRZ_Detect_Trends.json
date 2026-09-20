@@ -7,67 +7,260 @@
       "name": "Manual Trigger",
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
-      "position": [100, 300]
+      "position": [
+        100,
+        300
+      ]
     },
     {
       "parameters": {
-        "url": "https://trends.google.com/trending/rss?geo=US",
+        "values": {
+          "string": [
+            {
+              "name": "country_code",
+              "value": "US"
+            },
+            {
+              "name": "geo",
+              "value": "US"
+            },
+            {
+              "name": "language",
+              "value": "en"
+            },
+            {
+              "name": "gdelt_query",
+              "value": "sourcecountry:US"
+            },
+            {
+              "name": "google_trends_url",
+              "value": "https://trends.google.com/trending/rss?geo=US"
+            },
+            {
+              "name": "rss_feed_url",
+              "value": "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "config-node-1",
+      "name": "Workflow Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.gdeltproject.org/api/v2/doc/doc?query={{ $node[\"Workflow Configuration\"].json[\"gdelt_query\"] }}&mode=artlist&maxrecords=50&format=json&timespan=24h",
         "options": {
           "response": {
             "response": {
-              "responseFormat": "text"
+              "responseFormat": "json",
+              "neverError": true
             }
-          }
+          },
+          "timeout": 10000
         }
       },
-      "id": "fetch-trends-1",
-      "name": "Fetch Trend Data (Google Trends RSS)",
+      "continueOnFail": true,
+      "onError": "continueRegularOutput",
+      "id": "fetch-source-a-gdelt",
+      "name": "Fetch Source A (GDELT News)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [300, 300]
+      "position": [
+        500,
+        100
+      ]
     },
     {
       "parameters": {
-        "jsCode": "// =========================================================================\n// STAGE: Normalize Trends (Source Abstraction)\n// Converts raw RSS/XML into common TrendzNow structure:\n// {\n//   keyword, country_code, category, search_volume, trend_velocity,\n//   ranking, source, related_queries, normalized_keyword\n// }\n// =========================================================================\n\nconst rawXml = $input.first().json.data || $input.first().json.body || $input.first().json;\nconst xmlText = typeof rawXml === 'string' ? rawXml : JSON.stringify(rawXml);\n\nconst items = [];\nconst itemRegex = /<item>([\\s\\S]*?)<\\/item>/gi;\nlet match;\nlet rank = 1;\n\nwhile ((match = itemRegex.exec(xmlText)) !== null) {\n  const itemContent = match[1];\n\n  // Extract Title (Keyword)\n  const titleMatch = /<title>([\\s\\S]*?)<\\/title>/i.exec(itemContent);\n  const rawKeyword = titleMatch ? titleMatch[1].replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/gi, '$1').trim() : '';\n\n  // Extract Approx Traffic (Search Volume)\n  const trafficMatch = /<ht:approx_traffic>([\\s\\S]*?)<\\/ht:approx_traffic>/i.exec(itemContent);\n  let searchVolume = null;\n  if (trafficMatch) {\n    const rawTraffic = trafficMatch[1].replace(/\\D/g, '');\n    if (rawTraffic) {\n      searchVolume = parseInt(rawTraffic, 10);\n      if (trafficMatch[1].toLowerCase().includes('k')) {\n        searchVolume = searchVolume * 1000;\n      } else if (trafficMatch[1].toLowerCase().includes('m')) {\n        searchVolume = searchVolume * 1000000;\n      }\n    }\n  }\n\n  // Extract Related Queries / News Item Titles\n  const relatedQueries = [];\n  const newsTitleRegex = /<ht:news_item_title>([\\s\\S]*?)<\\/ht:news_item_title>/gi;\n  let newsMatch;\n  while ((newsMatch = newsTitleRegex.exec(itemContent)) !== null) {\n    const newsTitle = newsMatch[1]\n      .replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/gi, '$1')\n      .replace(/&apos;/g, \"'\")\n      .replace(/&quot;/g, '\"')\n      .replace(/&amp;/g, '&')\n      .trim();\n    if (newsTitle && !relatedQueries.includes(newsTitle)) {\n      relatedQueries.push(newsTitle);\n    }\n  }\n\n  if (rawKeyword) {\n    // Normalization rules\n    const normalizedKeyword = rawKeyword\n      .normalize('NFKC')\n      .toLowerCase()\n      .trim()\n      .replace(/\\s+/g, ' ');\n\n    items.push({\n      json: {\n        keyword: rawKeyword,\n        normalized_keyword: normalizedKeyword,\n        country_code: 'US',\n        category: 'General',\n        search_volume: searchVolume,\n        trend_velocity: null,\n        ranking: rank,\n        source: 'google_trends_rss',\n        related_queries: relatedQueries\n      }\n    });\n    rank++;\n  }\n}\n\nreturn items;"
+        "jsCode": "// =========================================================================\n// STAGE: Normalize Source A (GDELT News Signals)\n// Documented API: https://api.gdeltproject.org/api/v2/doc/doc\n// Common Normalized Structure:\n// {\n//   keyword, normalized_keyword, country_code, category, source,\n//   search_interest, news_volume, news_activity_score, news_velocity, ranking,\n//   related_queries, related_articles, observed_at\n// }\n// Important:\n// - GDELT provides news attention, NOT search interest (search_interest = null).\n// - Calculates news_activity_score (0-100) for current batch recency.\n// - Leaves news_velocity = null (reserved for historical multi-snapshot analysis).\n// =========================================================================\n\nconst rawInput = $input.first()?.json || {};\nconst config = $('Workflow Configuration').first()?.json || { country_code: 'US' };\n\nif (rawInput.error || (rawInput.statusCode && rawInput.statusCode >= 400)) {\n  console.warn(`[GDELT Warning] Source A failed: ${rawInput.error || rawInput.statusCode}`);\n  return [{\n    json: {\n      _telemetry: {\n        source: 'gdelt',\n        status: 'FAILED',\n        error: rawInput.error || `HTTP ${rawInput.statusCode}`,\n        records_received: 0,\n        records_normalized: 0\n      }\n    }\n  }];\n}\n\nconst articles = rawInput.articles || (typeof rawInput.data === 'object' ? rawInput.data.articles : []) || [];\nif (!Array.isArray(articles) || articles.length === 0) {\n  return [{\n    json: {\n      _telemetry: {\n        source: 'gdelt',\n        status: 'EMPTY',\n        error: null,\n        records_received: 0,\n        records_normalized: 0\n      }\n    }\n  }];\n}\n\nconst now = new Date().toISOString();\nconst topicMap = new Map();\n\nfor (const art of articles) {\n  if (!art.title) continue;\n  const rawTitle = art.title.trim();\n\n  const norm = rawTitle\n    .normalize('NFKC')\n    .toLowerCase()\n    .trim()\n    .replace(/\\s+/g, ' ');\n\n  if (!topicMap.has(norm)) {\n    topicMap.set(norm, {\n      keyword: rawTitle,\n      normalized_keyword: norm,\n      country_code: (art.sourcecountry || config.country_code).toUpperCase(),\n      category: 'News',\n      source: 'gdelt',\n      articles: [],\n      domains: new Set(),\n      timestamps: []\n    });\n  }\n\n  const entry = topicMap.get(norm);\n  entry.articles.push({\n    title: rawTitle,\n    url: art.url || '',\n    domain: art.domain || null,\n    seendate: art.seendate || null\n  });\n  if (art.domain) entry.domains.add(art.domain);\n  if (art.seendate) entry.timestamps.push(art.seendate);\n}\n\nconst items = [];\nfor (const entry of topicMap.values()) {\n  const newsVolume = entry.articles.length;\n  let newsActivityScore = null;\n  if (entry.timestamps.length > 0) {\n    newsActivityScore = Math.min(100, Math.round((newsVolume / Math.max(1, entry.domains.size)) * 20));\n  }\n\n  items.push({\n    json: {\n      keyword: entry.keyword,\n      normalized_keyword: entry.normalized_keyword,\n      country_code: entry.country_code,\n      category: entry.category,\n      source: entry.source,\n      search_interest: null,\n      news_volume: newsVolume,\n      news_activity_score: newsActivityScore,\n      news_velocity: null,\n      ranking: null,\n      related_queries: [],\n      related_articles: entry.articles.slice(0, 5),\n      observed_at: now,\n      _telemetry: {\n        source: 'gdelt',\n        status: 'HEALTHY',\n        error: null,\n        records_received: articles.length,\n        records_normalized: topicMap.size\n      }\n    }\n  });\n}\n\nreturn items;"
       },
-      "id": "normalize-node-1",
-      "name": "Normalize Trends",
+      "id": "normalize-source-a-gdelt",
+      "name": "Normalize Source A (GDELT)",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [520, 300]
+      "position": [
+        720,
+        100
+      ]
     },
     {
       "parameters": {
-        "jsCode": "// =========================================================================\n// STAGE: Validate Records & Deduplicate in Batch\n// Ensures records are well-formed and removes intra-batch duplicates.\n// =========================================================================\n\nconst seen = new Set();\nconst validated = [];\n\nfor (const item of $input.all()) {\n  const data = item.json;\n  if (!data.keyword || !data.normalized_keyword) continue;\n  if (typeof data.keyword !== 'string' || data.keyword.trim().length === 0) continue;\n\n  const key = `${data.normalized_keyword}::${data.country_code}`;\n  if (seen.has(key)) continue;\n  seen.add(key);\n\n  validated.push(item);\n}\n\nreturn validated;"
+        "url": "={{ $node[\"Workflow Configuration\"].json[\"google_trends_url\"] }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
       },
-      "id": "validate-dedup-1",
-      "name": "Validate & Deduplicate",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [720, 300]
+      "continueOnFail": true,
+      "onError": "continueRegularOutput",
+      "id": "fetch-source-b-trends",
+      "name": "Fetch Source B (Google Trends RSS)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        300
+      ]
     },
     {
       "parameters": {
-        "jsCode": "// =========================================================================\n// STAGE: Calculate Initial Metrics\n// Deterministic scoring (No LLM/AI):\n// - Opportunity Score (0–100)\n// - Risk Score (0–100)\n// - Status = \"detected\"\n// =========================================================================\n\nconst HIGH_RISK_KEYWORDS = [\n  'death', 'dead', 'dies', 'died', 'killing', 'killed', 'murder', 'murdered',\n  'shooting', 'shot', 'crash', 'fatal', 'suicide', 'attack', 'bomb', 'terror',\n  'war', 'conflict', 'arrest', 'arrested', 'indicted', 'fraud', 'scandal',\n  'emergency', 'disaster', 'outbreak', 'virus', 'overdose'\n];\n\nreturn $input.all().map(item => {\n  const data = item.json;\n  const kw = data.normalized_keyword;\n\n  // 1. Opportunity Score (0–100)\n  // Formula: 70% volume weight + 30% ranking bonus\n  let volumeScore = 20;\n  if (data.search_volume) {\n    if (data.search_volume >= 500000) volumeScore = 100;\n    else if (data.search_volume >= 200000) volumeScore = 85;\n    else if (data.search_volume >= 100000) volumeScore = 70;\n    else if (data.search_volume >= 50000) volumeScore = 55;\n    else if (data.search_volume >= 20000) volumeScore = 40;\n    else volumeScore = 25;\n  }\n\n  let rankScore = 10;\n  if (data.ranking) {\n    if (data.ranking <= 3) rankScore = 100;\n    else if (data.ranking <= 5) rankScore = 80;\n    else if (data.ranking <= 10) rankScore = 60;\n    else if (data.ranking <= 15) rankScore = 40;\n    else rankScore = 20;\n  }\n\n  const opportunityScore = Math.min(100, Math.round(volumeScore * 0.7 + rankScore * 0.3));\n\n  // 2. Risk Score (0–100)\n  // Deterministic keyword/category review flag for sensitive/unconfirmed topics\n  let riskScore = 10; // Default low risk baseline\n  const containsHighRisk = HIGH_RISK_KEYWORDS.some(term => kw.includes(term));\n  if (containsHighRisk) {\n    riskScore = 75; // Flag for priority editorial review\n  }\n\n  const now = new Date().toISOString();\n\n  return {\n    json: {\n      ...data,\n      opportunity_score: opportunityScore,\n      risk_score: riskScore,\n      status: 'detected',\n      first_detected_at: now,\n      last_detected_at: now,\n      created_at: now,\n      updated_at: now\n    }\n  };\n});"
+        "jsCode": "// =========================================================================\n// STAGE: Normalize Source B (Google Trends Public RSS)\n// Public Endpoint: https://trends.google.com/trending/rss?geo=...\n// Secondary search-interest signal. Isolated and replaceable.\n// Important:\n// - Search interest is an approximate bucket, NOT an exact count.\n// - Feed order is sequence only, NOT a factual popularity ranking.\n// - Leaves news_velocity = null (reserved for historical multi-snapshot analysis).\n// =========================================================================\n\nconst rawInput = $input.first()?.json || {};\nconst config = $('Workflow Configuration').first()?.json || { country_code: 'US' };\n\nif (rawInput.error || (rawInput.statusCode && rawInput.statusCode >= 400)) {\n  console.warn(`[Google Trends Warning] Source B failed: ${rawInput.error || rawInput.statusCode}`);\n  return [{\n    json: {\n      _telemetry: {\n        source: 'google_trends_rss',\n        status: 'FAILED',\n        error: rawInput.error || `HTTP ${rawInput.statusCode}`,\n        records_received: 0,\n        records_normalized: 0\n      }\n    }\n  }];\n}\n\nconst rawXml = rawInput.data || rawInput.body || rawInput;\nconst xmlText = typeof rawXml === 'string' ? rawXml : JSON.stringify(rawXml);\n\nif (!xmlText || !xmlText.includes('<item>')) {\n  return [{\n    json: {\n      _telemetry: {\n        source: 'google_trends_rss',\n        status: 'EMPTY',\n        error: 'No <item> tags found',\n        records_received: 0,\n        records_normalized: 0\n      }\n    }\n  }];\n}\n\nconst items = [];\nconst itemRegex = /<item>([\\s\\S]*?)<\\/item>/gi;\nlet match;\nlet rank = 1;\nlet count = 0;\nconst now = new Date().toISOString();\n\nwhile ((match = itemRegex.exec(xmlText)) !== null) {\n  count++;\n  const itemContent = match[1];\n\n  const titleMatch = /<title>([\\s\\S]*?)<\\/title>/i.exec(itemContent);\n  const rawKeyword = titleMatch ? titleMatch[1].replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/gi, '$1').trim() : '';\n  if (!rawKeyword) continue;\n\n  const trafficMatch = /<ht:approx_traffic>([\\s\\S]*?)<\\/ht:approx_traffic>/i.exec(itemContent);\n  let searchInterest = null;\n  if (trafficMatch) {\n    const rawTraffic = trafficMatch[1].trim();\n    const numOnly = rawTraffic.replace(/\\D/g, '');\n    if (numOnly) {\n      let val = parseInt(numOnly, 10);\n      if (/k/i.test(rawTraffic)) val *= 1000;\n      else if (/m/i.test(rawTraffic)) val *= 1000000;\n      searchInterest = val;\n    }\n  }\n\n  const pubDateMatch = /<pubDate>([\\s\\S]*?)<\\/pubDate>/i.exec(itemContent);\n  const pubDate = pubDateMatch ? pubDateMatch[1].trim() : null;\n\n  const relatedQueries = [];\n  const relatedArticles = [];\n  const newsItemRegex = /<ht:news_item>([\\s\\S]*?)<\\/ht:news_item>/gi;\n  let newsMatch;\n\n  while ((newsMatch = newsItemRegex.exec(itemContent)) !== null) {\n    const nContent = newsMatch[1];\n    const nTitleMatch = /<ht:news_item_title>([\\s\\S]*?)<\\/ht:news_item_title>/i.exec(nContent);\n    const nUrlMatch = /<ht:news_item_url>([\\s\\S]*?)<\\/ht:news_item_url>/i.exec(nContent);\n    const nSourceMatch = /<ht:news_item_source>([\\s\\S]*?)<\\/ht:news_item_source>/i.exec(nContent);\n\n    const nTitle = nTitleMatch ? nTitleMatch[1].replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/gi, '$1').replace(/&apos;/g, \"'\").replace(/&quot;/g, '\"').replace(/&amp;/g, '&').trim() : '';\n    const nUrl = nUrlMatch ? nUrlMatch[1].trim() : '';\n    const nSource = nSourceMatch ? nSourceMatch[1].trim() : '';\n\n    if (nTitle) {\n      if (!relatedQueries.includes(nTitle)) relatedQueries.push(nTitle);\n      relatedArticles.push({ title: nTitle, url: nUrl, source: nSource });\n    }\n  }\n\n  const normalizedKeyword = rawKeyword\n    .normalize('NFKC')\n    .toLowerCase()\n    .trim()\n    .replace(/\\s+/g, ' ');\n\n  items.push({\n    json: {\n      keyword: rawKeyword,\n      normalized_keyword: normalizedKeyword,\n      country_code: config.country_code,\n      category: 'General',\n      source: 'google_trends_rss',\n      search_interest: searchInterest,\n      news_volume: relatedArticles.length > 0 ? relatedArticles.length : null,\n      news_activity_score: null,\n      news_velocity: null,\n      ranking: rank,\n      related_queries: relatedQueries,\n      related_articles: relatedArticles,\n      observed_at: pubDate ? new Date(pubDate).toISOString() : now,\n      _telemetry: {\n        source: 'google_trends_rss',\n        status: 'HEALTHY',\n        error: null,\n        records_received: count,\n        records_normalized: rank\n      }\n    }\n  });\n  rank++;\n}\n\nreturn items;"
       },
-      "id": "metrics-calc-1",
-      "name": "Calculate Initial Metrics",
+      "id": "normalize-source-b-trends",
+      "name": "Normalize Source B (Google Trends)",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [920, 300]
+      "position": [
+        720,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $node[\"Workflow Configuration\"].json[\"rss_feed_url\"] }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput",
+      "id": "fetch-source-c-rss",
+      "name": "Fetch Source C (RSS Feeds)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// =========================================================================\n// STAGE: Normalize Source C (Reputable Public RSS / News Feeds)\n// Secondary news corroboration signal.\n// Important:\n// - search_interest = null. Do not use RSS counts as search volume.\n// - Leaves news_velocity = null (reserved for historical multi-snapshot analysis).\n// =========================================================================\n\nconst rawInput = $input.first()?.json || {};\nconst config = $('Workflow Configuration').first()?.json || { country_code: 'US' };\n\nif (rawInput.error || (rawInput.statusCode && rawInput.statusCode >= 400)) {\n  console.warn(`[RSS Feeds Warning] Source C failed: ${rawInput.error || rawInput.statusCode}`);\n  return [{\n    json: {\n      _telemetry: {\n        source: 'rss_feed',\n        status: 'FAILED',\n        error: rawInput.error || `HTTP ${rawInput.statusCode}`,\n        records_received: 0,\n        records_normalized: 0\n      }\n    }\n  }];\n}\n\nconst rawXml = rawInput.data || rawInput.body || rawInput;\nconst xmlText = typeof rawXml === 'string' ? rawXml : JSON.stringify(rawXml);\n\nif (!xmlText || !xmlText.includes('<item>')) {\n  return [{\n    json: {\n      _telemetry: {\n        source: 'rss_feed',\n        status: 'EMPTY',\n        error: 'No <item> tags found',\n        records_received: 0,\n        records_normalized: 0\n      }\n    }\n  }];\n}\n\nconst items = [];\nconst itemRegex = /<item>([\\s\\S]*?)<\\/item>/gi;\nlet match;\nlet count = 0;\nconst now = new Date().toISOString();\n\nwhile ((match = itemRegex.exec(xmlText)) !== null) {\n  count++;\n  const itemContent = match[1];\n\n  const titleMatch = /<title>([\\s\\S]*?)<\\/title>/i.exec(itemContent);\n  let rawTitle = titleMatch ? titleMatch[1].replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/gi, '$1').replace(/&apos;/g, \"'\").replace(/&quot;/g, '\"').replace(/&amp;/g, '&').trim() : '';\n  if (!rawTitle) continue;\n\n  const cleanKeyword = rawTitle.replace(/\\s*-\\s*[^-]+$/, '').trim() || rawTitle;\n  const linkMatch = /<link>([\\s\\S]*?)<\\/link>/i.exec(itemContent);\n  const url = linkMatch ? linkMatch[1].replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/gi, '$1').trim() : '';\n  const pubDateMatch = /<pubDate>([\\s\\S]*?)<\\/pubDate>/i.exec(itemContent);\n  const pubDate = pubDateMatch ? pubDateMatch[1].trim() : null;\n  const sourceMatch = /<source[^>]*>([\\s\\S]*?)<\\/source>/i.exec(itemContent);\n  const sourceName = sourceMatch ? sourceMatch[1].trim() : 'News RSS';\n\n  const normalizedKeyword = cleanKeyword\n    .normalize('NFKC')\n    .toLowerCase()\n    .trim()\n    .replace(/\\s+/g, ' ');\n\n  items.push({\n    json: {\n      keyword: cleanKeyword,\n      normalized_keyword: normalizedKeyword,\n      country_code: config.country_code,\n      category: 'News',\n      source: 'rss_feed',\n      search_interest: null,\n      news_volume: 1,\n      news_activity_score: null,\n      news_velocity: null,\n      ranking: null,\n      related_queries: [],\n      related_articles: [{ title: rawTitle, url, source: sourceName }],\n      observed_at: pubDate ? new Date(pubDate).toISOString() : now,\n      _telemetry: {\n        source: 'rss_feed',\n        status: 'HEALTHY',\n        error: null,\n        records_received: count,\n        records_normalized: items.length + 1\n      }\n    }\n  });\n}\n\nreturn items;"
+      },
+      "id": "normalize-source-c-rss",
+      "name": "Normalize Source C (RSS Feeds)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "append"
+      },
+      "id": "merge-sources-a-b",
+      "name": "Merge Sources A & B",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [
+        940,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "append"
+      },
+      "id": "merge-all-sources",
+      "name": "Merge All Sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [
+        1140,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// =========================================================================\n// STAGE: Deduplicate Topics (Conservative Deduplication & Evidence Preservation)\n// Deduplicates using:\n// 1. Exact normalized_keyword + country_code\n// 2. Conservative wording variations (Jaccard >= 0.80, min 3 words, or strict subset <= 1 word diff)\n// Preserves source attribution and source-level observations without destroying evidence.\n// Outputs diagnostic telemetry when all sources fail or return zero records.\n// =========================================================================\n\nconst rawItems = $input.all();\nconst candidates = [];\nconst telemetries = [];\n\nfor (const item of rawItems) {\n  const data = item.json;\n  if (data._telemetry) {\n    telemetries.push(data._telemetry);\n  }\n  if (data.keyword && data.normalized_keyword) {\n    candidates.push(data);\n  }\n}\n\nif (candidates.length === 0) {\n  const allFailed = telemetries.every(t => t.status === 'FAILED' || t.status === 'EMPTY');\n  return [{\n    json: {\n      _diagnostic: {\n        is_empty_result: true,\n        all_sources_failed: allFailed,\n        message: allFailed\n          ? 'CRITICAL: All trend detection sources failed or returned empty data.'\n          : 'Zero candidates found across healthy sources.',\n        source_health: telemetries,\n        timestamp: new Date().toISOString()\n      }\n    }\n  }];\n}\n\nconst stopWords = new Set([\n  'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'of', 'and', 'or', 'is',\n  'are', 'was', 'were', 'with', 'by', 'from', 'as', 'that', 'this', 'it', 'its'\n]);\n\nfunction getSignificantTokens(str) {\n  return str\n    .toLowerCase()\n    .replace(/[^\\w\\s]/g, '')\n    .split(/\\s+/)\n    .filter((w) => w.length > 2 && !stopWords.has(w));\n}\n\nfunction areConservativeDuplicates(kw1, kw2) {\n  if (kw1 === kw2) return true;\n  const t1 = getSignificantTokens(kw1);\n  const t2 = getSignificantTokens(kw2);\n\n  if (t1.length < 3 || t2.length < 3) return false;\n\n  const s1 = new Set(t1);\n  const s2 = new Set(t2);\n\n  let common = 0;\n  for (const token of s1) {\n    if (s2.has(token)) common++;\n  }\n\n  const unionSize = new Set([...s1, ...s2]).size;\n  const jaccard = common / unionSize;\n  if (jaccard >= 0.80) return true;\n\n  const smaller = s1.size <= s2.size ? s1 : s2;\n  const larger = s1.size <= s2.size ? s2 : s1;\n  if (common === smaller.size && larger.size - smaller.size <= 1 && smaller.size >= 3) {\n    return true;\n  }\n\n  return false;\n}\n\nconst merged = [];\n\nfor (const cand of candidates) {\n  let matched = null;\n  for (const existing of merged) {\n    if (\n      existing.country_code === cand.country_code &&\n      areConservativeDuplicates(existing.normalized_keyword, cand.normalized_keyword)\n    ) {\n      matched = existing;\n      break;\n    }\n  }\n\n  if (!matched) {\n    merged.push({\n      ...cand,\n      sources: [cand.source],\n      source_observations: [\n        {\n          source: cand.source,\n          keyword: cand.keyword,\n          search_interest: cand.search_interest,\n          news_volume: cand.news_volume,\n          observed_at: cand.observed_at\n        }\n      ],\n      related_queries: [...(cand.related_queries || [])],\n      related_articles: [...(cand.related_articles || [])]\n    });\n  } else {\n    matched.source_observations.push({\n      source: cand.source,\n      keyword: cand.keyword,\n      search_interest: cand.search_interest,\n      news_volume: cand.news_volume,\n      observed_at: cand.observed_at\n    });\n\n    if (!matched.sources.includes(cand.source)) {\n      matched.sources.push(cand.source);\n      matched.source = matched.sources.join(' + ');\n    }\n\n    if (cand.search_interest !== null) {\n      matched.search_interest =\n        matched.search_interest !== null\n          ? Math.max(matched.search_interest, cand.search_interest)\n          : cand.search_interest;\n    }\n\n    if (cand.news_volume !== null) {\n      matched.news_volume = (matched.news_volume || 0) + cand.news_volume;\n    }\n\n    for (const q of cand.related_queries || []) {\n      if (!matched.related_queries.includes(q)) {\n        matched.related_queries.push(q);\n      }\n    }\n\n    for (const art of cand.related_articles || []) {\n      const exists = matched.related_articles.some(\n        (a) => (art.url && a.url === art.url) || a.title === art.title\n      );\n      if (!exists) {\n        matched.related_articles.push(art);\n      }\n    }\n\n    if (cand.observed_at && (!matched.observed_at || cand.observed_at > matched.observed_at)) {\n      matched.observed_at = cand.observed_at;\n    }\n  }\n}\n\nreturn merged.map(data => ({ json: data }));"
+      },
+      "id": "deduplicate-topics",
+      "name": "Deduplicate Topics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// =========================================================================\n// STAGE: Calculate Trend Signals\n// Calculates separate signals (normalized 0–100 only when sufficient data exists):\n// 1. news_activity_score\n// 2. search_interest_score\n// 3. source_confirmation_score\n// 4. freshness_score\n// Outputs available_signals and missing_signals for auditability.\n// If a signal is unavailable, do NOT fabricate it (leave as null).\n// =========================================================================\n\nconst nowMs = Date.now();\n\nreturn $input.all().map(item => {\n  const data = item.json;\n  if (data._diagnostic) return item;\n\n  const available_signals = [];\n  const missing_signals = [];\n\n  // 1. news_activity_score (0–100 or null)\n  let news_activity_score = null;\n  if (data.news_activity_score !== null && data.news_activity_score !== undefined) {\n    news_activity_score = Math.min(100, Math.max(0, data.news_activity_score));\n    available_signals.push('news_activity');\n  } else if (data.news_volume && data.news_volume > 1) {\n    news_activity_score = Math.min(100, Math.round(data.news_volume * 15));\n    available_signals.push('news_activity');\n  } else {\n    missing_signals.push('news_activity');\n  }\n\n  // Historical news velocity is explicitly reserved for multi-snapshot analysis\n  missing_signals.push('historical_news_velocity');\n\n  // 2. search_interest_score (0–100 or null)\n  let search_interest_score = null;\n  if (data.search_interest !== null && data.search_interest !== undefined) {\n    if (data.search_interest >= 500000) search_interest_score = 100;\n    else if (data.search_interest >= 200000) search_interest_score = 85;\n    else if (data.search_interest >= 100000) search_interest_score = 70;\n    else if (data.search_interest >= 50000) search_interest_score = 55;\n    else if (data.search_interest >= 20000) search_interest_score = 40;\n    else if (data.search_interest >= 5000) search_interest_score = 30;\n    else search_interest_score = 20;\n    available_signals.push('search_interest');\n  } else {\n    missing_signals.push('search_interest');\n  }\n\n  // 3. source_confirmation_score (0–100)\n  let source_confirmation_score = 30;\n  const numSources = (data.sources || [data.source]).length;\n  const numArticles = (data.related_articles || []).length;\n  if (numSources >= 3 || numArticles >= 5) {\n    source_confirmation_score = 100;\n  } else if (numSources >= 2 || numArticles >= 3) {\n    source_confirmation_score = 75;\n  } else if (numArticles >= 2) {\n    source_confirmation_score = 50;\n  }\n  available_signals.push('source_confirmation');\n\n  // 4. freshness_score (0–100 or null)\n  let freshness_score = null;\n  if (data.observed_at) {\n    const ageHours = (nowMs - new Date(data.observed_at).getTime()) / (1000 * 60 * 60);\n    if (ageHours < 2) freshness_score = 100;\n    else if (ageHours < 6) freshness_score = 85;\n    else if (ageHours < 12) freshness_score = 65;\n    else if (ageHours < 24) freshness_score = 40;\n    else freshness_score = 20;\n    available_signals.push('freshness');\n  } else {\n    missing_signals.push('freshness');\n  }\n\n  return {\n    json: {\n      ...data,\n      news_activity_score,\n      search_interest_score,\n      source_confirmation_score,\n      freshness_score,\n      available_signals,\n      missing_signals\n    }\n  };\n});"
+      },
+      "id": "calculate-trend-signals",
+      "name": "Calculate Trend Signals",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// =========================================================================\n// STAGE: Calculate Initial Trend Score & Signal Completeness\n// Heuristic component weights:\n// - News Activity: 35%\n// - Search Interest: 30%\n// - Source Confirmation / Diversity: 20%\n// - Freshness: 15%\n// Formula: Only include components where underlying data exists.\n// trend_score = sum(weight_i * score_i) / sum(weight_i for present scores)\n// signal_completeness_score = sum(weight_i for present scores) * 100\n// confidence_score = alias for signal_completeness_score (backwards compatibility)\n// =========================================================================\n\nreturn $input.all().map(item => {\n  const data = item.json;\n  if (data._diagnostic) return item;\n\n  const components = [\n    { score: data.news_activity_score, weight: 0.35 },\n    { score: data.search_interest_score, weight: 0.30 },\n    { score: data.source_confirmation_score, weight: 0.20 },\n    { score: data.freshness_score, weight: 0.15 }\n  ];\n\n  let weightedSum = 0;\n  let availableWeight = 0;\n\n  for (const comp of components) {\n    if (comp.score !== null && comp.score !== undefined) {\n      weightedSum += comp.score * comp.weight;\n      availableWeight += comp.weight;\n    }\n  }\n\n  let trend_score = null;\n  let signal_completeness_score = 0;\n\n  if (availableWeight > 0) {\n    trend_score = Math.min(100, Math.round(weightedSum / availableWeight));\n    signal_completeness_score = Math.round(availableWeight * 100);\n  }\n\n  return {\n    json: {\n      ...data,\n      trend_score,\n      signal_completeness_score,\n      confidence_score: signal_completeness_score\n    }\n  };\n});"
+      },
+      "id": "calculate-trend-score",
+      "name": "Calculate Initial Trend Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// =========================================================================\n// STAGE: Classify Review Risk (Deterministic Editorial Routing)\n// Editorial policy:\n// - Identifies topics requiring human editorial review (deaths, disasters,\n//   violence, terror, elections, political conflicts, medical emergencies,\n//   allegations involving individuals, financial crises).\n// - Only an editorial review signal; does NOT determine truth or falsity.\n// - Must NOT automatically publish content.\n// - When uncertain, flag for human review.\n// =========================================================================\n\nconst HIGH_RISK_TERMS = [\n  'death', 'dead', 'dies', 'died', 'fatal', 'fatality', 'casualty', 'casualties',\n  'killing', 'killed', 'murder', 'murdered', 'suicide', 'shooting', 'shot', 'gunman',\n  'crash', 'attack', 'bomb', 'bombing', 'terror', 'hostage', 'war', 'conflict',\n  'airstrike', 'missile', 'election', 'voting', 'ballot', 'coup', 'arrest',\n  'arrested', 'indicted', 'indictment', 'fraud', 'scandal', 'emergency',\n  'disaster', 'outbreak', 'virus', 'epidemic', 'pandemic', 'overdose',\n  'bankruptcy', 'collapse', 'lawsuit', 'sexual assault', 'misconduct'\n];\n\nconst now = new Date().toISOString();\n\nreturn $input.all().map(item => {\n  const data = item.json;\n  if (data._diagnostic) return item;\n\n  const kw = data.normalized_keyword || '';\n  const matchedTerms = HIGH_RISK_TERMS.filter(term => kw.includes(term));\n\n  let risk_score = 10;\n  let requires_review = false;\n\n  if (matchedTerms.length > 0) {\n    risk_score = 75;\n    requires_review = true;\n  }\n\n  return {\n    json: {\n      ...data,\n      search_volume: data.search_interest !== null ? data.search_interest : null,\n      trend_velocity: null,\n      opportunity_score: data.trend_score,\n      risk_score: risk_score,\n      status: 'detected',\n      requires_review: requires_review,\n      risk_reasons: matchedTerms,\n      first_detected_at: now,\n      last_detected_at: now,\n      created_at: now,\n      updated_at: now\n    }\n  };\n});"
+      },
+      "id": "classify-review-risk",
+      "name": "Classify Review Risk",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1960,
+        300
+      ]
     },
     {
       "parameters": {
         "operation": "upsert",
         "tableId": "trends",
-        "matchColumns": ["normalized_keyword", "country_code"],
+        "matchColumns": [
+          "normalized_keyword",
+          "country_code"
+        ],
         "columns": "keyword, normalized_keyword, category, country_code, source, search_volume, trend_velocity, opportunity_score, risk_score, status, last_detected_at, updated_at"
       },
       "id": "supabase-upsert-1",
       "name": "Store / Update Trends (Supabase)",
       "type": "n8n-nodes-base.supabase",
       "typeVersion": 1,
-      "position": [1140, 300],
+      "position": [
+        2180,
+        300
+      ],
+      "disabled": true,
       "credentials": {
         "supabaseApi": {
           "id": "trendznow-supabase-api",
@@ -85,7 +278,11 @@
       "name": "Store Trend Snapshot (Supabase)",
       "type": "n8n-nodes-base.supabase",
       "typeVersion": 1,
-      "position": [1360, 300],
+      "position": [
+        2400,
+        300
+      ],
+      "disabled": true,
       "credentials": {
         "supabaseApi": {
           "id": "trendznow-supabase-api",
@@ -99,47 +296,156 @@
       "main": [
         [
           {
-            "node": "Fetch Trend Data (Google Trends RSS)",
+            "node": "Workflow Configuration",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Fetch Trend Data (Google Trends RSS)": {
+    "Workflow Configuration": {
       "main": [
         [
           {
-            "node": "Normalize Trends",
+            "node": "Fetch Source A (GDELT News)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Source B (Google Trends RSS)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Source C (RSS Feeds)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Normalize Trends": {
+    "Fetch Source A (GDELT News)": {
       "main": [
         [
           {
-            "node": "Validate & Deduplicate",
+            "node": "Normalize Source A (GDELT)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Validate & Deduplicate": {
+    "Normalize Source A (GDELT)": {
       "main": [
         [
           {
-            "node": "Calculate Initial Metrics",
+            "node": "Merge Sources A & B",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Calculate Initial Metrics": {
+    "Fetch Source B (Google Trends RSS)": {
+      "main": [
+        [
+          {
+            "node": "Normalize Source B (Google Trends)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Source B (Google Trends)": {
+      "main": [
+        [
+          {
+            "node": "Merge Sources A & B",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Sources A & B": {
+      "main": [
+        [
+          {
+            "node": "Merge All Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Source C (RSS Feeds)": {
+      "main": [
+        [
+          {
+            "node": "Normalize Source C (RSS Feeds)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Source C (RSS Feeds)": {
+      "main": [
+        [
+          {
+            "node": "Merge All Sources",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge All Sources": {
+      "main": [
+        [
+          {
+            "node": "Deduplicate Topics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deduplicate Topics": {
+      "main": [
+        [
+          {
+            "node": "Calculate Trend Signals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Trend Signals": {
+      "main": [
+        [
+          {
+            "node": "Calculate Initial Trend Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Initial Trend Score": {
+      "main": [
+        [
+          {
+            "node": "Classify Review Risk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Review Risk": {
       "main": [
         [
           {
