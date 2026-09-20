@@ -23,6 +23,9 @@ import Settings from './pages/app/Settings';
 // Fallback Page
 import NotFound from './pages/NotFound';
 
+// Diagnostic Test Page (Dev)
+import SupabaseTest from './pages/SupabaseTest';
+
 export default function App() {
   return (
     <Routes>
@@ -31,6 +34,7 @@ export default function App() {
         <Route path="/" element={<Home />} />
         <Route path="/article/:slug" element={<ArticleDetail />} />
         <Route path="/video/:id" element={<VideoDetail />} />
+        <Route path="/supabase-test" element={<SupabaseTest />} />
         <Route path="*" element={<NotFound />} />
       </Route>
 
